@@ -68,7 +68,6 @@ import static org.graalvm.wasm.Assert.assertTrue;
 import static org.graalvm.wasm.Assert.assertUnsignedIntLess;
 import static org.graalvm.wasm.WasmMath.maxUnsigned;
 import static org.graalvm.wasm.WasmMath.minUnsigned;
-import static org.graalvm.wasm.WasmMath.unsignedIntToLong;
 
 /**
  * Contains the symbol information of a module.
@@ -120,12 +119,21 @@ public abstract class SymbolTable {
             if (this.paramTypes.length != that.paramTypes.length) {
                 return false;
             }
-            for (int i = 0; i < paramTypes.length; i++) {
+            for (int i = 0; i < this.paramTypes.length; i++) {
                 if (this.paramTypes[i] != that.paramTypes[i]) {
                     return false;
                 }
             }
             return true;
+        }
+
+        @Override
+        public String toString() {
+            String[] paramNames = new String[paramTypes.length];
+            for (int i = 0; i < paramTypes.length; i++) {
+                paramNames[i] = WasmType.toString(paramTypes[i]);
+            }
+            return Arrays.toString(paramNames) + " -> " + WasmType.toString(returnType);
         }
     }
 
@@ -354,6 +362,7 @@ public abstract class SymbolTable {
 
     private void checkUniqueExport(String name) {
         if (exportedFunctions.containsKey(name) || exportedGlobals.containsKey(name) || exportedMemoryNames.contains(name) || exportedTableNames.contains(name)) {
+            CompilerDirectives.transferToInterpreter();
             throw WasmException.create(Failure.DUPLICATE_EXPORT, "All export names must be different, but '" + name + "' is exported twice.");
         }
     }
@@ -411,6 +420,7 @@ public abstract class SymbolTable {
         typeOffsets[typeIdx] = typeDataSize;
 
         if (numReturnTypes != 0 && numReturnTypes != 1) {
+            CompilerDirectives.transferToInterpreter();
             throw WasmException.create(Failure.INVALID_RESULT_ARITY, "A function can return at most one result.");
         }
 
@@ -453,6 +463,7 @@ public abstract class SymbolTable {
     void setEquivalenceClass(int index, int eqClass) {
         checkNotParsed();
         if (typeEquivalenceClasses[index] != NO_EQUIVALENCE_CLASS) {
+            CompilerDirectives.transferToInterpreter();
             throw WasmException.create(Failure.UNSPECIFIED_INVALID, "Type at index " + index + " already has an equivalence class.");
         }
         typeEquivalenceClasses[index] = eqClass;
@@ -468,9 +479,7 @@ public abstract class SymbolTable {
     private WasmFunction allocateFunction(int typeIndex, ImportDescriptor importDescriptor) {
         checkNotParsed();
         ensureFunctionsCapacity(numFunctions);
-        if (typeIndex < 0 || typeIndex >= typeCount) {
-            throw WasmException.create(Failure.UNKNOWN_TYPE, String.format("Function type out of bounds: %d should be < %d.", unsignedIntToLong(typeIndex), typeCount));
-        }
+        assertUnsignedIntLess(typeIndex, typeCount(), Failure.UNKNOWN_TYPE);
         final WasmFunction function = new WasmFunction(this, numFunctions, typeIndex, importDescriptor);
         functions[numFunctions] = function;
         numFunctions++;
@@ -498,9 +507,11 @@ public abstract class SymbolTable {
         checkNotParsed();
         WasmFunction start = function(functionIndex);
         if (start.numArguments() != 0) {
+            CompilerDirectives.transferToInterpreter();
             throw WasmException.create(Failure.START_FUNCTION_ARGUMENTS, "Start function cannot take arguments.");
         }
         if (start.returnTypeLength() != 0) {
+            CompilerDirectives.transferToInterpreter();
             throw WasmException.create(Failure.START_FUNCTION_RETURN_VALUE, "Start function cannot return a value.");
         }
         this.startFunctionIndex = functionIndex;
@@ -571,7 +582,7 @@ public abstract class SymbolTable {
         return typeCount;
     }
 
-    FunctionType typeAt(int index) {
+    public FunctionType typeAt(int index) {
         return new FunctionType(functionTypeArgumentTypes(index).toArray(), functionTypeReturnType(index));
     }
 
@@ -661,6 +672,7 @@ public abstract class SymbolTable {
         } else if (mutability == GlobalModifier.MUTABLE) {
             mutabilityBit = GLOBAL_MUTABLE_BIT;
         } else {
+            CompilerDirectives.transferToInterpreter();
             throw WasmException.create(Failure.UNSPECIFIED_INVALID, "Invalid mutability: " + mutability);
         }
         short globalType = (short) (mutabilityBit | valueType);
@@ -680,6 +692,7 @@ public abstract class SymbolTable {
                 instance.setGlobalAddress(index, address);
             });
         } catch (UnsupportedMessageException | UnknownIdentifierException e) {
+            CompilerDirectives.transferToInterpreter();
             throw WasmException.create(Failure.UNSPECIFIED_INTERNAL, "Global does not have a valid descriptor: " + global);
         }
     }
@@ -895,6 +908,7 @@ public abstract class SymbolTable {
         checkNotParsed();
         exportSymbol(name);
         if (!memoryExists()) {
+            CompilerDirectives.transferToInterpreter();
             throw WasmException.create(Failure.UNSPECIFIED_INVALID, "No memory has been declared or imported, so memory cannot be exported.");
         }
         exportedMemoryNames.add(name);

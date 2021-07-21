@@ -1,3 +1,9 @@
+---
+layout: docs
+toc_group: truffle
+link_title: Optimizing Truffle Interpreters
+permalink: /graalvm-as-a-platform/language-implementation-framework/Optimizing/
+---
 # Optimizing Truffle Interpreters
 
 This document discusses tools for optimizing or debugging Truffle interpreters for peak temporal performance.
@@ -502,7 +508,7 @@ To make the best use of the former options, limit what is compiled to the method
 
 ## Ideal Graph Visualizer
 
-The [Ideal Graph Visualizer (IGV)](https://docs.oracle.com/en/graalvm/enterprise/20/docs/tools/igv/) is a tool to understand Truffle ASTs and the GraalVM compiler graphs.
+The [Ideal Graph Visualizer (IGV)](https://docs.oracle.com/en/graalvm/enterprise/21/docs/tools/igv/) is a tool to understand Truffle ASTs and the GraalVM compiler graphs.
 
 A typical usage is to run with `--vm.Dgraal.Dump=Truffle:1 --vm.Dgraal.PrintGraph=Network`, which will show you Truffle ASTs, guest-language call graphs, and the Graal graphs as they leave the Truffle phase.
 If the `-Dgraal.PrintGraph=Network` flag is omitted then the dump files are placed in the `graal_dumps` directory, which you should then open in IGV.
@@ -522,8 +528,12 @@ Files are put into a `graal_dumps` directory which you should then open in the C
 THe `--vm.XX:+UnlockDiagnosticVMOptions --vm.XX:+PrintAssembly` commands combination prints assembly code.
 You will need to install `hsdis` using `mx hsdis` in `graal/compiler`, or manually install it into the current directory from [here](https://lafo.ssw.uni-linz.ac.at/pub/graal-external-deps/hsdis/intel/).
 
+Typical usage is `--vm.Dgraal.Dump --vm.Dgraal.PrintBackendCFG=true`. Files are
+put into a `graal_dumps` directory which you should then open in the
+C1 Visualizer.
+
 Combine with `--vm.XX:TieredStopAtLevel=0` to disable compilation of runtime routines so that it's easier to find your guest-language method.
 
 Note: You can also look at assembly code in the C1 Visualizer.
 
-These have been the most commot and powerful ways to optimize or debug Truffle interpreters.
+These have been the most common and powerful ways to optimize or debug Truffle interpreters.

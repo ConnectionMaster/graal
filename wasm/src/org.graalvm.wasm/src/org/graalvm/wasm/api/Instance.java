@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2020, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -50,6 +50,7 @@ import com.oracle.truffle.api.interop.UnsupportedMessageException;
 import org.graalvm.collections.Pair;
 import org.graalvm.wasm.WasmContext;
 import org.graalvm.wasm.WasmFunction;
+import org.graalvm.wasm.WasmFunctionInstance;
 import org.graalvm.wasm.WasmInstance;
 import org.graalvm.wasm.WasmTable;
 import org.graalvm.wasm.exception.Failure;
@@ -144,12 +145,14 @@ public class Instance extends Dictionary {
                         ensureImportModule(importModules, d.module()).addGlobal(d.name(), member);
                         break;
                     default:
+                        CompilerDirectives.transferToInterpreter();
                         throw WasmException.create(Failure.UNSPECIFIED_INTERNAL, "Unimplemented case: " + d.kind());
                 }
 
                 i += 1;
             }
         } catch (InvalidArrayIndexException | UnknownIdentifierException | ClassCastException | UnsupportedMessageException e) {
+            CompilerDirectives.transferToInterpreter();
             throw WasmException.create(Failure.UNSPECIFIED_INTERNAL, "Unexpected state.");
         }
 
@@ -247,14 +250,7 @@ public class Instance extends Dictionary {
 
             if (function != null) {
                 final CallTarget target = instance.target(function.index());
-                e.addMember(name, new Executable(args -> {
-                    final Object prev = truffleContext.enter(null);
-                    try {
-                        return target.call(args);
-                    } finally {
-                        truffleContext.leave(null, prev);
-                    }
-                }));
+                e.addMember(name, new WasmFunctionInstance(context, function, target));
             } else if (globalIndex != null) {
                 final int index = globalIndex;
                 final int address = instance.globalAddress(index);
@@ -273,6 +269,7 @@ public class Instance extends Dictionary {
                 final WasmTable table = instance.table();
                 e.addMember(name, new Table(table));
             } else {
+                CompilerDirectives.transferToInterpreter();
                 throw WasmException.create(Failure.UNSPECIFIED_INTERNAL, "Exported symbol list does not match the actual exports.");
             }
         }

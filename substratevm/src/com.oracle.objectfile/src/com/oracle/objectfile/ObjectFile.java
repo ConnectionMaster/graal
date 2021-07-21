@@ -24,8 +24,11 @@
  */
 package com.oracle.objectfile;
 
-import java.io.Closeable;
+// Checkstyle: allow reflection
+
 import java.io.IOException;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.nio.Buffer;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -53,6 +56,7 @@ import com.oracle.objectfile.elf.ELFObjectFile;
 import com.oracle.objectfile.macho.MachOObjectFile;
 import com.oracle.objectfile.pecoff.PECoffObjectFile;
 
+import sun.misc.Unsafe;
 import sun.nio.ch.DirectBuffer;
 
 /**
@@ -281,11 +285,11 @@ public abstract class ObjectFile {
         AARCH64_R_AARCH64_ADD_ABS_LO12_NC,
         AARCH64_R_LD_PREL_LO19,
         AARCH64_R_GOT_LD_PREL19,
+        AARCH64_R_AARCH64_LDST128_ABS_LO12_NC,
         AARCH64_R_AARCH64_LDST64_ABS_LO12_NC,
         AARCH64_R_AARCH64_LDST32_ABS_LO12_NC,
         AARCH64_R_AARCH64_LDST16_ABS_LO12_NC,
-        AARCH64_R_AARCH64_LDST8_ABS_LO12_NC,
-        AARCH64_R_AARCH64_LDST128_ABS_LO12_NC;
+        AARCH64_R_AARCH64_LDST8_ABS_LO12_NC;
 
         public static RelocationKind getDirect(int relocationSize) {
             switch (relocationSize) {
@@ -410,9 +414,8 @@ public abstract class ObjectFile {
          *            bytes
          * @param useImplicitAddend whether the current bytes are to be used as an addend
          * @param explicitAddend a full-width addend, or null if useImplicitAddend is true
-         * @return the relocation record created (or found, if it exists already)
          */
-        RelocationRecord markRelocationSite(int offset, ByteBuffer bb, RelocationKind k, String symbolName, boolean useImplicitAddend, Long explicitAddend);
+        void markRelocationSite(int offset, ByteBuffer bb, RelocationKind k, String symbolName, boolean useImplicitAddend, Long explicitAddend);
 
         /**
          * Force the creation of a relocation section/element for this section, and return it. This
@@ -443,7 +446,7 @@ public abstract class ObjectFile {
          * passed a buffer. It uses the byte array accessed by {@link #getContent} and
          * {@link #setContent}.
          */
-        RelocationRecord markRelocationSite(int offset, RelocationKind k, String symbolName, boolean useImplicitAddend, Long explicitAddend);
+        void markRelocationSite(int offset, RelocationKind k, String symbolName, boolean useImplicitAddend, Long explicitAddend);
     }
 
     public interface NobitsSectionImpl extends ElementImpl {
@@ -976,7 +979,7 @@ public abstract class ObjectFile {
 
         @Override
         public String toString() {
-            return getClass().getSimpleName() + "(" + name + ")";
+            return getClass().getName() + "(" + name + ")";
         }
 
         @Override
@@ -1268,11 +1271,46 @@ public abstract class ObjectFile {
         int totalSize = bake(sortedObjectFileElements);
         try {
             ByteBuffer buffer = outputChannel.map(MapMode.READ_WRITE, 0, totalSize);
-            try (Closeable ignored = () -> ((DirectBuffer) buffer).cleaner().clean()) {
+            try {
                 writeBuffer(sortedObjectFileElements, buffer);
+            } finally {
+                cleanBuffer(buffer); // unmap immediately
             }
-        } catch (IOException e) {
+        } catch (IOException | ReflectiveOperationException e) {
             throw new RuntimeException(e);
+        }
+    }
+
+    private static void cleanBuffer(ByteBuffer buffer) throws ReflectiveOperationException {
+        try {
+            /*
+             * Trying to use sun.misc.Unsafe.invokeCleaner as the first approach restores forward
+             * compatibility to Java > 8. If it fails we know we are on Java 8 where we can use a
+             * non-forward compatible way of forcing to clean the ByteBuffer.
+             */
+            Method invokeCleanerMethod = Unsafe.class.getMethod("invokeCleaner", ByteBuffer.class);
+            invokeCleanerMethod.invoke(UNSAFE, buffer);
+        } catch (NoSuchMethodException e) {
+            /* On Java 8 we have to use the non-forward compatible approach. */
+            ((DirectBuffer) buffer).cleaner().clean();
+        }
+    }
+
+    private static final Unsafe UNSAFE = initUnsafe();
+
+    @SuppressWarnings("restriction")
+    private static Unsafe initUnsafe() {
+        try {
+            return Unsafe.getUnsafe();
+        } catch (SecurityException se) {
+            Field theUnsafe = null;
+            try {
+                theUnsafe = Unsafe.class.getDeclaredField("theUnsafe");
+                theUnsafe.setAccessible(true);
+                return (Unsafe) theUnsafe.get(null);
+            } catch (ReflectiveOperationException e) {
+                throw new RuntimeException("exception while trying to get Unsafe", e);
+            }
         }
     }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, 2020, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2019, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -126,7 +126,12 @@ public class WasmRootNode extends RootNode implements WasmNodeInterface {
         // https://webassembly.github.io/spec/core/exec/instructions.html#function-calls
         initializeLocals(stacklocals);
 
-        body.execute(context, frame, stacklocals);
+        try {
+            body.execute(context, frame, stacklocals);
+        } catch (StackOverflowError e) {
+            CompilerDirectives.transferToInterpreter();
+            throw WasmException.create(Failure.CALL_STACK_EXHAUSTED);
+        }
 
         switch (body.returnTypeId()) {
             case 0x00:
@@ -152,6 +157,7 @@ public class WasmRootNode extends RootNode implements WasmNodeInterface {
                 return Double.longBitsToDouble(returnValue);
             }
             default:
+                CompilerDirectives.transferToInterpreter();
                 throw WasmException.format(Failure.UNSPECIFIED_INTERNAL, this, "Unknown return type id: %d", body.returnTypeId());
         }
     }

@@ -29,9 +29,16 @@ import static com.oracle.svm.core.graal.llvm.util.LLVMUtils.dumpTypes;
 import static com.oracle.svm.core.graal.llvm.util.LLVMUtils.dumpValues;
 import static com.oracle.svm.core.graal.llvm.util.LLVMUtils.getType;
 import static com.oracle.svm.core.graal.llvm.util.LLVMUtils.getVal;
+import static jdk.vm.ci.code.MemoryBarriers.JMM_POST_VOLATILE_READ;
+import static jdk.vm.ci.code.MemoryBarriers.JMM_POST_VOLATILE_WRITE;
+import static jdk.vm.ci.code.MemoryBarriers.JMM_PRE_VOLATILE_READ;
+import static jdk.vm.ci.code.MemoryBarriers.JMM_PRE_VOLATILE_WRITE;
 import static org.graalvm.compiler.debug.GraalError.shouldNotReachHere;
 import static org.graalvm.compiler.debug.GraalError.unimplemented;
 
+// Checkstyle: allow reflection
+import java.lang.reflect.Field;
+// Checkstyle: disallow reflection
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -59,7 +66,6 @@ import org.graalvm.compiler.debug.GraalError;
 import org.graalvm.compiler.lir.LIRFrameState;
 import org.graalvm.compiler.lir.LIRInstruction;
 import org.graalvm.compiler.lir.LabelRef;
-import org.graalvm.compiler.lir.StandardOp;
 import org.graalvm.compiler.lir.Variable;
 import org.graalvm.compiler.lir.VirtualStackSlot;
 import org.graalvm.compiler.lir.gen.ArithmeticLIRGeneratorTool;
@@ -72,6 +78,7 @@ import org.graalvm.compiler.nodes.ValueNode;
 import org.graalvm.compiler.nodes.cfg.Block;
 import org.graalvm.compiler.nodes.type.NarrowOopStamp;
 import org.graalvm.compiler.phases.util.Providers;
+import org.graalvm.compiler.serviceprovider.JavaVersionUtil;
 import org.graalvm.nativeimage.c.constant.CEnum;
 import org.graalvm.util.GuardedAnnotationAccess;
 
@@ -175,7 +182,7 @@ public class LLVMGenerator implements LIRGeneratorTool, SubstrateLIRGenerator {
         this.providers = providers;
         this.compilationResult = result;
         this.builder = new LLVMIRBuilder(method.format("%H.%n"));
-        this.arithmetic = new ArithmeticLLVMGenerator(builder);
+        this.arithmetic = new ArithmeticLLVMGenerator();
         this.lirKindTool = new LLVMUtils.LLVMKindTool(builder);
         this.debugInfoPrinter = new DebugInfoPrinter(this, debugLevel);
 
@@ -731,7 +738,13 @@ public class LLVMGenerator implements LIRGeneratorTool, SubstrateLIRGenerator {
         LLVMTypeRef newType = LLVMIRBuilder.typeOf(newValue);
         assert LLVMIRBuilder.compatibleTypes(expectedType, newType) : dumpValues("invalid cmpxchg arguments", expectedValue, newValue);
 
-        LLVMValueRef castedAddress = builder.buildBitcast(address, builder.pointerType(expectedType, LLVMIRBuilder.isObjectType(typeOf(address)), false));
+        boolean trackedAddress = LLVMIRBuilder.isObjectType(typeOf(address));
+        LLVMValueRef castedAddress;
+        if (!trackedAddress && LLVMIRBuilder.isObjectType(expectedType)) {
+            castedAddress = builder.buildAddrSpaceCast(address, builder.pointerType(expectedType, true, false));
+        } else {
+            castedAddress = builder.buildBitcast(address, builder.pointerType(expectedType, trackedAddress, false));
+        }
         return builder.buildCmpxchg(castedAddress, expectedValue, newValue, returnValue);
     }
 
@@ -802,9 +815,9 @@ public class LLVMGenerator implements LIRGeneratorTool, SubstrateLIRGenerator {
     }
 
     @Override
-    public VirtualStackSlot allocateStackSlots(int slots) {
+    public VirtualStackSlot allocateStackMemory(int sizeInBytes, int alignmentInBytes) {
         builder.positionAtStart();
-        LLVMValueRef alloca = builder.buildArrayAlloca(builder.wordType(), slots);
+        LLVMValueRef alloca = builder.buildArrayAlloca(builder.byteType(), sizeInBytes, alignmentInBytes);
         builder.positionAtEnd(getBlockEnd(currentBlock));
 
         return new LLVMStackSlot(alloca);
@@ -1351,17 +1364,17 @@ public class LLVMGenerator implements LIRGeneratorTool, SubstrateLIRGenerator {
     }
 
     @Override
-    public StandardOp.ZapRegistersOp createZapRegisters(Register[] zappedRegisters, JavaConstant[] zapValues) {
+    public LIRInstruction createZapRegisters(Register[] zappedRegisters, JavaConstant[] zapValues) {
         throw unimplemented("the LLVM backend doesn't support diagnostic operations");
     }
 
     @Override
-    public StandardOp.ZapRegistersOp createZapRegisters(Register[] zappedRegisters) {
+    public LIRInstruction createZapRegisters(Register[] zappedRegisters) {
         throw unimplemented("the LLVM backend doesn't support diagnostic operations");
     }
 
     @Override
-    public StandardOp.ZapRegistersOp createZapRegisters() {
+    public LIRInstruction createZapRegisters() {
         throw unimplemented("the LLVM backend doesn't support diagnostic operations");
     }
 
@@ -1377,11 +1390,8 @@ public class LLVMGenerator implements LIRGeneratorTool, SubstrateLIRGenerator {
 
     /* Arithmetic */
 
-    public static class ArithmeticLLVMGenerator implements ArithmeticLIRGeneratorTool, LLVMIntrinsicGenerator {
-        private final LLVMIRBuilder builder;
-
-        ArithmeticLLVMGenerator(LLVMIRBuilder builder) {
-            this.builder = builder;
+    public class ArithmeticLLVMGenerator implements ArithmeticLIRGeneratorTool, LLVMIntrinsicGenerator {
+        ArithmeticLLVMGenerator() {
         }
 
         @Override
@@ -1605,6 +1615,18 @@ public class LLVMGenerator implements LIRGeneratorTool, SubstrateLIRGenerator {
         }
 
         @Override
+        public Value emitMathSignum(Value input) {
+            LLVMValueRef val = getVal(input);
+            LLVMTypeRef type = typeOf(val);
+            assert LLVMIRBuilder.isFloatType(type) || LLVMIRBuilder.isDoubleType(type);
+
+            LLVMValueRef zero = LLVMIRBuilder.isFloatType(type) ? builder.constantFloat(0.0f) : builder.constantDouble(0.0d);
+            LLVMValueRef one = LLVMIRBuilder.isFloatType(type) ? builder.constantFloat(1.0f) : builder.constantDouble(1.0d);
+            LLVMValueRef signum = builder.buildSelect(builder.buildCompare(Condition.EQ, val, zero, true), val, builder.buildCopysign(one, val));
+            return new LLVMVariable(signum);
+        }
+
+        @Override
         public Value emitMathLog(Value input, boolean base10) {
             LLVMValueRef value = getVal(input);
             LLVMValueRef log = base10 ? builder.buildLog10(value) : builder.buildLog(value);
@@ -1758,12 +1780,17 @@ public class LLVMGenerator implements LIRGeneratorTool, SubstrateLIRGenerator {
 
         @Override
         public Variable emitVolatileLoad(LIRKind kind, Value address, LIRFrameState state) {
-            throw GraalError.shouldNotReachHere();
+            emitMembar(JMM_PRE_VOLATILE_READ);
+            Variable var = emitLoad(kind, address, state);
+            emitMembar(JMM_POST_VOLATILE_READ);
+            return var;
         }
 
         @Override
         public void emitVolatileStore(ValueKind<?> kind, Value address, Value input, LIRFrameState state) {
-            throw GraalError.shouldNotReachHere();
+            emitMembar(JMM_PRE_VOLATILE_WRITE);
+            emitStore(kind, address, input, state);
+            emitMembar(JMM_POST_VOLATILE_WRITE);
         }
     }
 
@@ -1936,5 +1963,50 @@ public class LLVMGenerator implements LIRGeneratorTool, SubstrateLIRGenerator {
                 this.level = level;
             }
         }
+    }
+
+    @Override
+    public void emitCacheWriteback(Value address) {
+        int cacheLineSize = getDataCacheLineFlushSize();
+        if (cacheLineSize == 0) {
+            throw shouldNotReachHere("cache writeback with cache line size of 0");
+        }
+        LLVMValueRef start = builder.buildBitcast(getVal(address), builder.rawPointerType());
+        LLVMValueRef end = builder.buildGEP(start, builder.constantInt(cacheLineSize));
+        builder.buildClearCache(start, end);
+    }
+
+    @Override
+    public void emitCacheWritebackSync(boolean isPreSync) {
+        throw unimplemented("cache sync barrier (GR-30894)");
+    }
+
+    private static final int dataCacheLineFlushSize = initDataCacheLineFlushSize();
+
+    /**
+     * Gets the value of {@code jdk.internal.misc.UnsafeConstants.DATA_CACHE_LINE_FLUSH_SIZE} which
+     * was introduced in JDK 14 by JEP 352.
+     *
+     * This method uses reflection to be compatible with JDKs prior to 14.
+     */
+    private static int initDataCacheLineFlushSize() {
+        if (JavaVersionUtil.JAVA_SPEC >= 14) {
+            Class<?> c;
+            try {
+                // Checkstyle: stop
+                c = Class.forName("jdk.internal.misc.UnsafeConstants");
+                // Checkstyle: resume
+                Field f = c.getDeclaredField("DATA_CACHE_LINE_FLUSH_SIZE");
+                f.setAccessible(true);
+                return (int) f.get(null);
+            } catch (Exception e) {
+                throw new GraalError(e, "Expected UnsafeConstants.DATA_CACHE_LINE_FLUSH_SIZE to exist and be readable");
+            }
+        }
+        return 0;
+    }
+
+    private static int getDataCacheLineFlushSize() {
+        return dataCacheLineFlushSize;
     }
 }

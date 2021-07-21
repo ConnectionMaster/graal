@@ -38,9 +38,11 @@ import java.util.NoSuchElementException;
 import java.util.Optional;
 import java.util.Scanner;
 import java.util.function.Consumer;
+import java.util.stream.Collectors;
 
 import org.graalvm.compiler.serviceprovider.JavaVersionUtil;
 import org.graalvm.nativeimage.ImageSingletons;
+import org.graalvm.nativeimage.Platform;
 
 import com.oracle.svm.core.OS;
 import com.oracle.svm.core.SubstrateOptions;
@@ -51,6 +53,7 @@ import com.oracle.svm.core.option.SubstrateOptionsParser;
 import com.oracle.svm.core.util.InterruptImageBuilding;
 import com.oracle.svm.core.util.UserError;
 import com.oracle.svm.hosted.c.util.FileUtils;
+import com.oracle.svm.util.ClassUtil;
 
 import jdk.vm.ci.aarch64.AArch64;
 import jdk.vm.ci.amd64.AMD64;
@@ -65,9 +68,6 @@ public abstract class CCompilerInvoker {
         this.tempDirectory = tempDirectory;
         try {
             this.compilerInfo = getCCompilerInfo();
-            if (this.compilerInfo == null) {
-                UserError.abort("Unable to detect supported %s native software development toolchain.", OS.getCurrent().name());
-            }
         } catch (UserError.UserException err) {
             throw addSkipCheckingInfo(err);
         }
@@ -149,7 +149,12 @@ public abstract class CCompilerInvoker {
                     scanner.next();
                     targetArch = scanner.next();
                 }
-                if (scanner.findInLine("Microsoft.*\\(R\\) C/C\\+\\+") == null) {
+                /*
+                 * Some cl.exe print "... Microsoft (R) C/C++ ... ##.##.#####" while others print
+                 * "...C/C++ ... Microsoft (R) ... ##.##.#####".
+                 */
+                if (scanner.findInLine("Microsoft.*\\(R\\) C/C\\+\\+") == null &&
+                                scanner.findInLine("C/C\\+\\+.*Microsoft.*\\(R\\)") == null) {
                     return null;
                 }
                 scanner.useDelimiter("\\D");
@@ -181,8 +186,9 @@ public abstract class CCompilerInvoker {
                                 JavaVersionUtil.JAVA_SPEC, compilerInfo);
             }
             if (guessArchitecture(compilerInfo.targetArch) != AMD64.class) {
-                UserError.abort("Native-image building on Windows currently only supports target architecture: %s (%s unsupported)",
-                                AMD64.class.getSimpleName(), compilerInfo.targetArch);
+                String targetPrefix = compilerInfo.targetArch.matches("(.*x|i\\d)86$") ? "32-bit architecture " : "";
+                UserError.abort("Native-image building on Windows currently only supports target architecture: %s (%s%s unsupported)",
+                                AMD64.class.getSimpleName(), targetPrefix, compilerInfo.targetArch);
             }
         }
 
@@ -207,7 +213,10 @@ public abstract class CCompilerInvoker {
 
         @Override
         protected String getDefaultCompiler() {
-            return LibCBase.singleton().getTargetCompiler();
+            if (Platform.includedIn(Platform.LINUX.class)) {
+                return LibCBase.singleton().getTargetCompiler();
+            }
+            return "gcc";
         }
 
         @Override
@@ -222,7 +231,7 @@ public abstract class CCompilerInvoker {
                 }
 
                 if (scanner.findInLine("clang version ") != null) {
-                    scanner.useDelimiter("[. ]");
+                    scanner.useDelimiter("[. -]");
                     int major = scanner.nextInt();
                     int minor0 = scanner.nextInt();
                     int minor1 = scanner.nextInt();
@@ -346,10 +355,9 @@ public abstract class CCompilerInvoker {
     private CompilerInfo getCCompilerInfo() {
         Path compilerPath = getCCompilerPath().toAbsolutePath();
         if (!SubstrateOptions.CheckToolchain.getValue()) {
-            return new CompilerInfo(compilerPath, null, getClass().getSimpleName(), null, 0, 0, 0, null);
+            return new CompilerInfo(compilerPath, null, ClassUtil.getUnqualifiedName(getClass()), null, 0, 0, 0, null);
         }
         List<String> compilerCommand = createCompilerCommand(compilerPath, getVersionInfoOptions(), null);
-        CompilerInfo result = null;
         Process compilerProcess = null;
         try {
             ProcessBuilder processBuilder = FileUtils.prepareCommand(compilerCommand, tempDirectory);
@@ -359,24 +367,32 @@ public abstract class CCompilerInvoker {
             FileUtils.traceCommand(processBuilder);
 
             compilerProcess = processBuilder.start();
+            List<String> lines;
+            CompilerInfo result;
             try (InputStream inputStream = compilerProcess.getInputStream()) {
-                List<String> lines = FileUtils.readAllLines(inputStream);
+                lines = FileUtils.readAllLines(inputStream);
 
                 FileUtils.traceCommandOutput(lines);
 
                 result = createCompilerInfo(compilerPath, new Scanner(String.join(System.lineSeparator(), lines)));
             }
             compilerProcess.waitFor();
+            if (result == null) {
+                String errorMessage = "Unable to detect supported %s native software development toolchain.%n" +
+                                "Querying with command '%s' prints:%n%s";
+                throw UserError.abort(errorMessage, OS.getCurrent().name(), SubstrateUtil.getShellCommandString(compilerCommand, false),
+                                lines.stream().map(str -> "  " + str).collect(Collectors.joining(System.lineSeparator())));
+            }
+            return result;
         } catch (InterruptedException ex) {
             throw new InterruptImageBuilding("Interrupted during checking native-compiler " + compilerPath);
         } catch (IOException e) {
-            UserError.abort(e, "Collecting native-compiler info with '%s' failed", SubstrateUtil.getShellCommandString(compilerCommand, false));
+            throw UserError.abort(e, "Collecting native-compiler info with '%s' failed", SubstrateUtil.getShellCommandString(compilerCommand, false));
         } finally {
             if (compilerProcess != null) {
                 compilerProcess.destroy();
             }
         }
-        return result;
     }
 
     protected List<String> getVersionInfoOptions() {
@@ -408,6 +424,7 @@ public abstract class CCompilerInvoker {
                 return AArch64.class;
             case "i686":
             case "80x86": /* Windows notation */
+            case "x86":
                 /* Graal does not support 32-bit architectures */
             default:
                 return null;
@@ -521,7 +538,7 @@ public abstract class CCompilerInvoker {
     private List<String> createCompilerCommand(Path compilerPath, List<String> options, Path target, Path... input) {
         List<String> command = new ArrayList<>();
         command.add(compilerPath.toString());
-        command.addAll(Arrays.asList(SubstrateOptions.CCompilerOption.getValue()));
+        command.addAll(SubstrateOptions.CCompilerOption.getValue().values());
         command.addAll(options);
 
         if (target != null) {
