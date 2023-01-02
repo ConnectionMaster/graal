@@ -636,10 +636,10 @@
 		"@types/mustache": "^4.0.1",
 		"@types/decompress": "^4.2.3",
 		"@types/vscode": "^1.49.0",
-		"ts-loader": "^6.2.1",
+		"ts-loader": "^9.4.2",
 		"tslint": "^6.1.0",
 		"typescript": "^3.8.3",
-		"webpack": "^4.42.0",
-		"webpack-cli": "^3.3.11"
+		"webpack": "^5.75.0",
+		"webpack-cli": "^5.0.1"
 	}
 }
